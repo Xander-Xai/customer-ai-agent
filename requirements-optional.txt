@@ -4,6 +4,10 @@ edge-tts>=6.1.0  # 语音合成（TTSProcessor）
 pdfplumber>=0.10.0  # PDF 文档解析（DocumentProcessor）
 python-docx>=1.0.0  # Word 文档解析（DocumentProcessor）
 
+# 仅 MCP 外部工具适配（`tools/mcp_adapter.py`）需要：官方 `mcp` SDK，延迟 import。
+# `MCP_ENABLED` 默认 false，不开这个依赖时 MCP 工具一个都不注册，核心功能不受影响。
+mcp>=2.0.0  # MCP（Model Context Protocol）外部工具传输层
+
 # 仅 `scripts/migrate_chroma_to_qdrant.py` 需要：v6.0 已迁移到 Qdrant，该脚本是
 # **一次性历史数据迁移工具**，延迟 import + 自带失败提示，核心运行时不需要。
 chromadb>=0.5.0  # legacy ChromaDB -> Qdrant 迁移（仅历史迁移脚本）

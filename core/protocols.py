@@ -105,6 +105,14 @@ class ToolRegistryProtocol(Protocol):
         """列出已注册的工具名。"""
         ...
 
+    def unregister(self, name: str) -> bool:
+        """撤销注册（回滚用），返回是否真的移除过一个工具。
+
+        MCP 工具是运行时叠加进同一个注册表的，多 server 初始化可能部分成功后失败；
+        没有撤销能力就无法把注册表恢复到「本次 attempt 之前」的状态。
+        """
+        ...
+
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
         """获取供 LLM Function Calling 使用的工具定义。"""
         ...

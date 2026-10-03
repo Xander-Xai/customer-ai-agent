@@ -348,6 +348,32 @@ TOOL_RESULT_SEMANTIC_SUMMARY_ENABLED = (
 )
 TOOL_RESULT_CACHE_ENABLED = os.getenv("TOOL_RESULT_CACHE_ENABLED", "false").lower() == "true"
 
+# ===== MCP（Model Context Protocol）外部工具接入 =====
+# 默认**关闭**。MCP 工具是来自外部进程（可能是第三方）的不可信输入源，
+# 与进程内 native 工具的信任级别不同，因此必须显式开启 + 显式 allowlist。
+#
+# MCP_SERVERS 是 JSON 数组 allowlist，每条形如：
+#   {"name": "catalog", "transport": "stdio", "command": "python3",
+#    "args": ["-m", "my_mcp_server"], "allowed_tools": ["get_product_info"],
+#    "timeout_seconds": 15.0, "max_payload_bytes": 32768,
+#    "enabled": true, "risk_level": "low"}
+#
+# ``risk_level`` 与 ``core.hitl.risk.RiskLevel`` **同源**，只能取
+# ``low`` / ``medium`` / ``high``（见 MCP_RISK_LEVELS），不另立词汇表。
+#
+# **read-only-first**：只有显式声明 ``"low"`` 的 server 的工具才会被注册
+# （见 tools/mcp_adapter.py::register_mcp_tools）。缺失或非法的 ``risk_level``
+# 一律收敛到 ``HIGH``（只向上收敛，绝不向下），因此其工具**不会**进入
+# Function Calling 表面。本模块尚未为写操作接通幂等 ledger 与人工审批链路，
+# 接入写操作 MCP 工具必须先补这两道防线。
+MCP_ENABLED = os.getenv("MCP_ENABLED", "false").lower() == "true"
+MCP_SERVERS = os.getenv("MCP_SERVERS", "")
+MCP_DEFAULT_TIMEOUT_SECONDS = _float_env("MCP_DEFAULT_TIMEOUT_SECONDS", 15.0)
+MCP_MAX_PAYLOAD_BYTES = _int_env("MCP_MAX_PAYLOAD_BYTES", 32768)
+# 初始化失败时是否 fail closed（抛出，阻止服务启动）还是降级为 native-only。
+# 生产默认应设 true：静默降级会让「以为 MCP 已生效」的运维假设与实际不符。
+MCP_FAIL_CLOSED = os.getenv("MCP_FAIL_CLOSED", "false").lower() == "true"
+
 # ===== v4.0: 用户认证配置 =====
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 JWT_EXPIRE_HOURS = _int_env("JWT_EXPIRE_HOURS", 72)
@@ -582,6 +608,7 @@ HITL_REVIEWER_ROLES = tuple(
     if r.strip()
 )
 
+# ---------------------------------------------------------------------------
 if AGENT_RUN_THREAD_LOCK_BACKEND not in ("redis", "memory"):
     raise ConfigurationError(
         f"AGENT_RUN_THREAD_LOCK_BACKEND 非法: {AGENT_RUN_THREAD_LOCK_BACKEND!r}"
@@ -698,6 +725,78 @@ SLA_HIERARCHICAL_MAX = _float_env("SLA_HIERARCHICAL_MAX", 30.0)
 SLA_REACT_MAX = _float_env("SLA_REACT_MAX", 30.0)
 
 
+def validate_mcp_settings(
+    *,
+    enabled: bool = MCP_ENABLED,
+    servers: str = MCP_SERVERS,
+    max_payload_bytes: int = MCP_MAX_PAYLOAD_BYTES,
+) -> list[str]:
+    """校验 MCP 配置（纯函数，无 IO），返回错误信息列表（空 = 通过）。
+
+    只做**结构性**检查，不去连接任何 server：这里的职责是让明显不可用的配置在
+    启动时炸掉，而不是等到第一次工具调用才失败。
+
+    刻意不检查的东西：``MCP_SERVERS`` 里的每条记录是否合法由
+    ``tools.mcp_adapter.load_mcp_server_configs`` 负责（它对单条非法记录是
+    跳过 + 记日志，而非整体拒绝），避免同一个 JSON 在两处用两套规则解析。
+    """
+    if not enabled:
+        return []
+
+    errors: list[str] = []
+    text = (servers or "").strip()
+    if not text:
+        errors.append("MCP_ENABLED=true 但 MCP_SERVERS 为空：没有 allowlist 就没有可连接的 server")
+        return errors
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError) as e:
+        errors.append(f"MCP_SERVERS 不是合法 JSON: {type(e).__name__}")
+        return errors
+    if not isinstance(data, list):
+        errors.append(f"MCP_SERVERS 必须是 JSON 数组，实际是 {type(data).__name__}")
+        return errors
+    if not data:
+        errors.append("MCP_SERVERS 是空数组：等于没有声明任何 server")
+        return errors
+    for item in data:
+        if not isinstance(item, dict) or not item.get("name"):
+            errors.append("MCP_SERVERS 中存在缺少 name 的条目")
+            break
+        errors.extend(_validate_mcp_risk_level(item))
+    if max_payload_bytes <= 0:
+        errors.append(f"MCP_MAX_PAYLOAD_BYTES 必须为正数（当前 {max_payload_bytes}）")
+    return errors
+
+
+#: MCP server 允许显式声明的风险等级。**与 ``core.hitl.risk.RiskLevel`` 同源**，
+#: 这里只做字面量校验，不另立词汇表。
+MCP_RISK_LEVELS = ("low", "medium", "high")
+
+
+def _validate_mcp_risk_level(item: dict) -> list[str]:
+    """MCP server ``risk_level`` 的结构性校验（fail closed 的方向是"响亮地失败"）。
+
+    运行时（``tools.mcp_adapter._coerce_risk_level``）会把缺失 / 非法的
+    ``risk_level`` 一律收敛到 ``HIGH``，绝不会放行。这里额外在**启动期**报出来，
+    是为了让"我以为配了 low、实际拼错了"或"压根忘了配"这两种错误在部署时就可见，
+    而不是等到工具列表莫名为空才发现。
+    """
+    name = item.get("name")
+    raw = item.get("risk_level")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return [
+            f"MCP server {name!r} 未显式声明 risk_level —— 按 'high' 处理，"
+            '该 server 的工具不会被注册；若确认只读请加 "risk_level": "low"'
+        ]
+    if not isinstance(raw, str) or raw.strip().lower() not in MCP_RISK_LEVELS:
+        return [
+            f"MCP server {name!r} 的 risk_level 非法（{raw!r}）—— 期望 "
+            f"{MCP_RISK_LEVELS} 之一；将按 'high' 处理（工具不会被注册）"
+        ]
+    return []
+
+
 # ===== P0-3: 生产环境关键配置启动校验 =====
 def validate_required_config():
     """生产环境启动时校验关键配置项非空非占位符"""
@@ -783,6 +882,17 @@ def validate_required_config():
                 dev_mode=_DEV_MODE,
             )
         )
+
+    # MCP：生产开启时必须给出可用的 server allowlist。MCP 默认关闭，所以这里只在
+    # 显式开启时校验；fail closed —— 配错了就拒绝启动，而不是让服务带着「以为 MCP
+    # 已生效、实际一个工具都没注册」的状态跑起来。
+    errors.extend(
+        validate_mcp_settings(
+            enabled=MCP_ENABLED,
+            servers=MCP_SERVERS,
+            max_payload_bytes=MCP_MAX_PAYLOAD_BYTES,
+        )
+    )
 
     # P0-2 / P0-6: 生产 session + dispatch + gunicorn 多 worker + lock TTL（纯函数）
     errors.extend(

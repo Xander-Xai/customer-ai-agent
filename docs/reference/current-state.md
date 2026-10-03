@@ -110,6 +110,30 @@ python3 scripts/audit_doc_consistency.py
   （`rag/retrieval_contract.py`）→ RRF 融合 → rerank（`rag/reranker.py`）→ context。
   BM25 lifecycle: `rag/bm25_lifecycle.py`；确定性 point ID 与迁移：`rag/point_id.py`、
   `rag/point_id_migration.py`。
+- **MCP 外部工具接入（`tools/mcp_adapter.py`）默认关闭**：`MCP_ENABLED=false`。
+  它是 Function Calling 的**传输层扩展**，不是替代品 —— native 工具（ERP / RAG /
+  系统内建）继续走进程内注册表，MCP 工具叠加进**同一个** `ToolRegistry`，
+  同名时跳过、绝不覆盖 native。
+  - 安全立场：MCP **不构成新的安全边界**。外部 server 是不可信输入，风险等级
+    **沿用** `core.hitl.risk.RiskLevel`（low/medium/high），不另立词汇表。
+  - `MCP_SERVERS` 是 JSON 数组 allowlist（空 = 不允许任何 server）；
+    `allowed_tools` 为空同样等于不允许任何工具。
+  - **read-only-first**：只有显式 `risk_level: "low"` 的 server 的工具才注册。
+    缺失 / 非法（含历史词汇 `read` / `write`）**只向上**收敛到 `HIGH`，
+    绝不 fail-open。`medium` / `high` 一律不注册。
+  - **不采信 server 自述的 `annotations`** 来决定风险等级。
+  - 命名空间 `mcp__{server}__{tool}`；server 名禁止含 `__`；超长名截断补 sha256。
+  - 启动期结构校验：`core/config.py::validate_mcp_settings`（fail closed）。
+    `MCP_FAIL_CLOSED=true` 时初始化失败阻止启动，而不是静默降级为 native-only。
+  - **边界（不得越界宣称）**：写操作 MCP 工具**未接入**（缺幂等 ledger + 人工审批
+    两道防线）；RBAC 是**请求级**而非 per-tool，不能声称"MCP 工具经过了 RBAC"；
+    响应侧结果大小当前**不设上限**（只限请求 payload 字节），属已知缺口；
+    官方 `mcp` SDK 是 `requirements-optional.txt` 里的**可选**依赖，延迟 import。
+  - **Evidence**：`IMPLEMENTED`，仅**纯函数契约**经
+    `tests/unit/test_mcp_adapter.py` 运行验证。跨进程 / 传输 / 策略 / 时序的
+    **端到端契约取证当前为 `NOT_VERIFIED`**，在它落地并跑出真实结果前不得声称
+    MCP 端到端可用。设计取舍详见
+    [docs/interview/failure-and-tradeoffs.md](../interview/failure-and-tradeoffs.md) §7。
 - Embedding 通过 HTTP API 计算（`rag/api_embedding.py`），应用侧计算、Qdrant 只做存储检索。
 - LLM 客户端：`llm/client.py`（指数退避重试 + 熔断 + FC + SSE 流式 + 连接池）；
   降级兜底 `llm/rule_based_llm.py`。

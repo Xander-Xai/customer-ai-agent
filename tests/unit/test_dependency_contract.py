@@ -46,6 +46,10 @@ TRANSITIVE_PROVIDERS: dict[str, str | tuple[str, ...]] = {
     "requests": ("qdrant-client", "langchain-community", "edge-tts"),
     "multipart": "python-multipart",
     "jose": "python-jose",
+    # tools/mcp_adapter.py 用 anyio.fail_after 给 MCP 握手加超时。anyio 是
+    # starlette（FastAPI 依赖）与官方 mcp SDK 共同传递提供的硬依赖，二者都已在
+    # requirements*.txt 中声明，故不必单独声明 anyio。
+    "anyio": ("starlette", "mcp"),
 }
 
 #: 这些模块由仓库自身提供，不是第三方依赖。

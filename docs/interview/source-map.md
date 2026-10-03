@@ -102,7 +102,7 @@
 | 真实 ERP 写操作 | **NOT_MEASURED**（Mock 为主） | [production-evidence.md](../evaluation/production-evidence.md) |
 | 649-query RAG 指标 | **NOT_MEASURED**（provider 401） | [rag-evaluation.md](../reference/rag-evaluation.md) |
 | Kubernetes 生产就绪 | **未进入主线**（见 §MCP / K8s 处理） | [failure-and-tradeoffs.md](failure-and-tradeoffs.md) §为什么没有直接上 K8s |
-| MCP 工具适配 | **未进主线**（实验快照存档在 tag `archive/integration-distributed-runtime-a9dc939`） | [failure-and-tradeoffs.md](failure-and-tradeoffs.md) §为什么 MCP 目前不进主线 |
+| MCP 工具适配 | **已进主线，默认关闭**（`MCP_ENABLED=false`；read-only-first，只注册显式 `low` 的 server 工具）。端到端契约取证 `NOT_VERIFIED` | [failure-and-tradeoffs.md](failure-and-tradeoffs.md) §为什么 MCP 以「默认关闭 + 只读优先」的方式进主线 |
 | 多租户 / SAML / OIDC / 完整 IAM | **有意不做** | [failure-and-tradeoffs.md](failure-and-tradeoffs.md) §为什么没有 multi-tenant |
 | exactly-once 投递 | **有意不做**（at-least-once + 三层幂等） | [failure-and-tradeoffs.md](failure-and-tradeoffs.md) §1 |
 

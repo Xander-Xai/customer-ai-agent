@@ -13,6 +13,15 @@ from core.tool_result_cache import ToolCachePolicy
 
 logger = get_logger("tools.registry")
 
+#: 工具来源。native = 进程内 Function Calling 工具；mcp = 外部 MCP server 工具
+#: （经 ``tools/mcp_adapter.py`` 叠加进同一个注册表）。
+#:
+#: ``source`` 纯粹是**可观测性**维度：它不改变执行语义、不影响风险等级、不参与
+#: 幂等或审批判定。用途是让「哪些工具来自不可信的外部进程」在注册表层面可见
+#: （审计、指标、debug），而不是散落在调用日志里。
+SOURCE_NATIVE = "native"
+SOURCE_MCP = "mcp"
+
 
 @dataclass
 class ToolDefinition:
@@ -44,6 +53,8 @@ class ToolDefinition:
     （审批防不该做的被做，ledger 防做了被重做）。只读工具标 high 不会造成损害
     （闸门只拦 pending_actions，不拦只读工具的执行）。
     """
+    source: str = SOURCE_NATIVE
+    """工具来源标签（native / mcp），仅用于可观测性，详见 ``SOURCE_NATIVE``。"""
 
 
 class ToolRegistry:
@@ -64,6 +75,7 @@ class ToolRegistry:
         cache_policy: ToolCachePolicy | None = None,
         side_effect: bool = False,
         risk_level: str | None = None,
+        source: str = SOURCE_NATIVE,
     ):
         """注册一个工具"""
         self._tools[name] = ToolDefinition(
@@ -74,8 +86,27 @@ class ToolRegistry:
             cache_policy=cache_policy or ToolCachePolicy(),
             side_effect=side_effect,
             risk_level=risk_level,
+            source=source,
         )
         logger.debug(f"工具已注册: {name}")
+
+    def unregister(self, name: str) -> bool:
+        """撤销注册，返回是否真的移除过一个工具。
+
+        存在的唯一理由是**注册的事务性**：MCP 工具是运行时叠加进同一个注册表的
+        （见 ``tools.mcp_adapter.register_mcp_tools``），一次多 server 初始化可能
+        前一个 server 已注册成功、后一个失败。fail-closed 时必须能把「本次 attempt
+        新增的那些」撤销掉，否则注册表会留下指向已关闭 adapter 的工具 ——
+        LLM 仍会看到并调用它们，只会在调用瞬间炸。
+
+        未注册的名字是 **no-op**（返回 ``False``）而不是抛错：回滚路径必须能对
+        「可能已经删过了」的名字安全重试，且撤销失败不应掩盖真正的初始化错误。
+        """
+        if name in self._tools:
+            del self._tools[name]
+            logger.debug(f"工具已注销: {name}")
+            return True
+        return False
 
     def get_openai_tools(self) -> list[dict[str, Any]]:
         """返回 OpenAI Function Calling 格式的工具列表"""
@@ -264,3 +295,12 @@ class ToolRegistry:
         """
         tool = self._tools.get(name)
         return tool.risk_level if tool else None
+
+    def source_for(self, name: str) -> str | None:
+        """该工具的来源（native / mcp）；不存在返回 None。"""
+        tool = self._tools.get(name)
+        return tool.source if tool else None
+
+    def tools_by_source(self, source: str) -> list[str]:
+        """按来源返回工具名（保持注册顺序）。未知来源返回空列表。"""
+        return [tool.name for tool in self._tools.values() if tool.source == source]

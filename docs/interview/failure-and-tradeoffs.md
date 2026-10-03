@@ -243,30 +243,68 @@ checkpoint 已提交"—— 混淆了两者。见 §10.1。
 
 ---
 
-## 7. 为什么 MCP 目前不进主线
+## 7. 为什么 MCP 以「默认关闭 + 只读优先」的方式进主线
 
-**决策**：MCP（Model Context Protocol）工具适配不进主线。
-旧实验快照保留在 tag `archive/integration-distributed-runtime-a9dc939`。
+**决策**：MCP（Model Context Protocol）工具适配**已进主线**，但默认**关闭**
+（`MCP_ENABLED=false`），且采用 **read-only-first** 策略。
+实现见 `tools/mcp_adapter.py`，配置见 `core/config.py::validate_mcp_settings`。
 
-**为什么**：三个判断：
+> 历史决策记录：早期版本曾决定「MCP 不进主线」（`NOT_IMPLEMENTED`），
+> 旧实验快照保留在 tag `archive/integration-distributed-runtime-a9dc939`。
+> 下面先保留当时的反对理由，再说明现在**是什么设计**回应了它们。
 
-1. **解决的问题不是当前瓶颈。** 当前痛点是 durability 与幂等（已解决），
+### 7.1 当初为什么推迟（仍然成立的判断）
+
+1. **解决的问题不是当时的瓶颈。** 当时的痛点是 durability 与幂等（PR #27 已解决），
    不是"如何接入更多工具"。已有 Function Calling 工具注册表
    （`tools/tool_registry.py`）能覆盖需求。
 2. **MCP 会引入新的信任边界。** 外部 MCP server 提供的工具是**不可信输入**：
    返回值可能含恶意内容、可能试图注入 prompt、可能调用不期望的工具。
-   这需要一整套 server 信任与沙箱机制，而本项目的 HITL 边界是按
-   "自建工具"设计的。
+   这一点**至今成立**，是下面所有约束存在的原因。
 3. **旧快照的 runtime / HITL 实现已经过时。** 那是 PR #27 之前的状态，
-   与当前 `main` 的 HITL 治理边界不一致，整体搬运会带回已知的 correctness 缺陷。
+   与当前 `main` 的 HITL 治理边界不一致。
 
-**代价**：没有 MCP 就不能复用社区 MCP server 的工具生态。
+### 7.2 现在的设计如何回应信任边界（而不是绕过它）
 
-**Evidence**：`NOT_IMPLEMENTED`（有意推迟）。旧代码仅作为参考存档。
+MCP 被定位为 **tool transport（传输层），不是新的安全边界**。风险等级**沿用**
+`core.hitl.risk.RiskLevel`（low/medium/high），**不另立 MCP 专用权限体系**：
 
-**Future extension**：如果要做，从 `feat/mcp-tool-adapter-v2` 基于最新 `main` 重写，
-只提取"工具适配层"的思路，**不复用**旧 runtime / HITL 实现。
-且 MCP 工具必须默认视为高风险（走 §8 的两道防线）。
+- **默认关闭**：`MCP_ENABLED=false`。不开启时 MCP 工具一个都不注册，
+  核心功能完全不依赖官方 `mcp` SDK（`requirements-optional.txt`，延迟 import）。
+- **显式 allowlist**：`MCP_SERVERS` 是 JSON 数组 allowlist，空 = 不允许任何
+  server。`allowed_tools` 为空同样等于不允许任何工具（allowlist 语义，
+  不是"空 = 全部允许"）。
+- **read-only-first**：只有**显式**声明 `risk_level: "low"` 的 server 的工具才会
+  被注册。缺失 / 非法（含历史词汇 `read` / `write`）一律**只向上**收敛到 `HIGH`，
+  绝不 fail-open —— 想放行只读必须显式写 `"low"`。
+- **不信任 server 自述**：`tools/list` 返回的 `annotations` **不被采信**来决定风险
+  等级。远端声称"我只读"不构成任何依据。
+- **命名空间隔离**：`mcp__{server}__{tool}`；server 名禁止含 `__`（否则命名空间
+  可被伪造）；超长名截断后补 raw 名的 sha256 前 8 位，避免撞名覆盖已有工具。
+- **与 native 共存而非替代**：ERP / RAG / 系统内建低延迟工具继续走 native；
+  MCP 工具叠加进**同一个** `ToolRegistry`，同名时**跳过**并计
+  `skipped_collision`，绝不覆盖 native 工具。
+
+### 7.3 尚未做、也不假装做了的事
+
+- **写操作 MCP 工具未接入**。`medium` / `high` 的 server 工具一律不注册。
+  原因：写操作必须先接通**幂等 ledger**（`runtime/side_effects.py`）与
+  **人工审批**（`core/hitl/`）这两道防线，本次不提供。声称"支持 MCP 写操作"
+  是错的。
+- **RBAC 是请求级、不是 per-tool**。不能说"MCP 工具经过了 RBAC"。
+- **响应侧结果大小当前不设上限**（只限制请求 payload 字节）。已知缺口。
+
+**Evidence**：`IMPLEMENTED`。本 PR 只落地**纯函数契约**（命名空间化、schema
+归一化、风险只向上收敛、allowlist 解析、启动期结构校验、注册表 `source`
+可观测性），由 `tests/unit/test_mcp_adapter.py` 覆盖并已运行通过。
+
+跨进程 / 传输 / 策略 / 时序的**端到端契约取证**（deterministic fake MCP server
++ `registry → adapter → server → policy/telemetry` 全链路）**不在本 PR**，
+当前状态为 `NOT_VERIFIED`。在它落地并跑出真实结果之前，不得声称 MCP
+端到端可用。
+
+**代价**（仍然成立）：默认关闭意味着默认部署**用不到** MCP；要启用必须显式
+配置 allowlist 并逐个声明 `risk_level`，运维成本高于 native 工具。
 
 ---
 

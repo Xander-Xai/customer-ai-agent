@@ -42,6 +42,7 @@ quote-style = "double"
 # targets (`make runtime-chaos`), never by pytest collection.
 norecursedirs = ["scripts", "deploy", "htmlcov", "node_modules", ".venv", ".worktrees", ".claude"]
 markers = [
+    "integration: 集成测试（真实子进程 / 真实基础设施；离线可跑，不依赖外部服务）",
     "real_llm: 真实 LLM 端到端测试（需要真实 API Key，默认跳过）",
     "stress: 压力测试（耗时较长）",
     "xdist_group: 组隔离执行标识",
